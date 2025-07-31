@@ -1,78 +1,68 @@
 @echo off
 setlocal EnableDelayedExpansion
 
-:: Caminho do log na área de trabalho (somente erros)
-set "LOG=%USERPROFILE%\Desktop\Otimizacao_Erros.txt"
-echo [INICIO - %DATE% %TIME%] > "%LOG%"
+:: Caminho do log
+set "logDir=C:\Brasinfo"
+set "logFile=%logDir%\Otimizacao_Erros.txt"
 
-:: Executar como administrador se necessário
->nul 2>&1 "%SYSTEMROOT%\system32\cacls.exe" "%SYSTEMROOT%\system32\config\system"
-if '%errorlevel%' NEQ '0' (
-    powershell -Command "Start-Process '%~f0' -Verb RunAs"
-    exit /b
+:: Criar pasta de log, se não existir
+if not exist "%logDir%" (
+    mkdir "%logDir%"
 )
 
-:: 1. Desativar UAC (nível sistema)
-reg ADD "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v EnableLUA /t REG_DWORD /d 0 /f 2>> "%LOG%"
+:: Função para logar erro
+set "logError=echo [ERRO %%~1] >> "%logFile%""
 
-:: 2. Perfil de energia e desligamento de disco
-powercfg /setactive SCHEME_MIN 2>> "%LOG%"
-powercfg -change -disk-timeout-ac 0 2>> "%LOG%"
+:: Registrar início
+echo [INICIO - %date% %time%] > "%logFile%"
+
+:: 1. Desativar UAC
+reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v EnableLUA /t REG_DWORD /d 0 /f || echo [ERRO UAC] >> "%logFile%"
+
+:: 2. Perfil de energia: alto desempenho e sem desligamento de disco
+powercfg /s SCHEME_MIN || echo [ERRO PERFIL ENERGIA] >> "%logFile%"
+powercfg -change -disk-timeout-ac 0 || echo [ERRO DISCO AC] >> "%logFile%"
+powercfg -change -disk-timeout-dc 0 || echo [ERRO DISCO DC] >> "%logFile%"
 
 :: 3. Desativar Firewall
-netsh advfirewall set allprofiles state off 2>> "%LOG%"
+netsh advfirewall set allprofiles state off || echo [ERRO FIREWALL] >> "%logFile%"
 
 :: 4. Desativar IPv6
-reg add "HKLM\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters" /v DisabledComponents /t REG_DWORD /d 255 /f 2>> "%LOG%"
+reg add "HKLM\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters" /v DisabledComponents /t REG_DWORD /d 255 /f || echo [ERRO IPV6] >> "%logFile%"
 
-:: 5. Desativar gerenciamento de energia da placa de rede (NICs)
-for /f "tokens=*" %%a in ('wmic nic where "NetEnabled='true'" get Name /value ^| find "="') do (
-    set "nic=%%a"
-    set "nic=!nic:~5!"
-    powershell -Command "Get-WmiObject -Namespace root\wmi -Class MSNdis_EthernetPermanentAddress | ForEach-Object { $_.InstanceName }" > nul 2>> "%LOG%"
+:: 5. Desativar desligamento de energia da placa de rede
+for /f "tokens=*" %%A in ('wmic path win32_networkadapter where "PhysicalAdapter=True" get DeviceID /value ^| find "DeviceID"') do (
+    set "dev=%%A"
+    set "dev=!dev:~9!"
+    powercfg -devicequery wake_armed | findstr /i "%%A" >nul && powercfg -devicedisablewake "%%A"
 )
 
-:: 6. Forçar Windows Update via PowerShell
-powershell -ExecutionPolicy Bypass -Command ^
-"try { ^
-  Set-ExecutionPolicy RemoteSigned -Scope Process -Force; ^
-  Install-PackageProvider -Name NuGet -Force -Scope CurrentUser; ^
-  Install-Module PSWindowsUpdate -Force -Scope CurrentUser; ^
-  Import-Module PSWindowsUpdate; ^
-  Get-WindowsUpdate -AcceptAll -Install -AutoReboot ^
-} catch { $_ | Out-File -FilePath '%LOG%' -Append }" 2>> "%LOG%"
+:: 6. Forçar update do Windows
+dism /online /cleanup-image /restorehealth || echo [ERRO DISM RESTORE] >> "%logFile%"
+sfc /scannow || echo [ERRO SFC] >> "%logFile%"
 
-:: 7. Habilitar .NET Frameworks
-dism /online /enable-feature /featurename:NetFx3 /All /LimitAccess /NoRestart 2>> "%LOG%"
-dism /online /enable-feature /featurename:NetFx4 /All /NoRestart 2>> "%LOG%"
-dism /online /enable-feature /featurename:NetFx4-AdvSrvs /All /NoRestart 2>> "%LOG%"
-dism /online /enable-feature /featurename:WCF-Services45 /All /NoRestart 2>> "%LOG%"
-dism /online /enable-feature /featurename:WCF-HTTP-Activation45 /All /NoRestart 2>> "%LOG%"
-dism /online /enable-feature /featurename:WCF-NonHTTP-Activation /All /NoRestart 2>> "%LOG%"
+:: 7. Habilitar .NET Framework 3.5 e 4.8
+dism /online /enable-feature /featurename:NetFx3 /All /norestart || echo [ERRO .NET 3.5] >> "%logFile%"
+dism /online /enable-feature /featurename:NetFx4 /All /norestart || echo [ERRO .NET 4.8] >> "%logFile%"
 
-:: 8, 9, 10, 11. Configurações de Internet (nível de sistema via Default User)
-reg load HKU\Default "C:\Users\Default\NTUSER.DAT" 2>> "%LOG%"
+:: 8. Opções de internet - Segurança
+reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings\Zones\3" /v "1A10" /t REG_DWORD /d 0 /f || echo [ERRO ZONA SEGURANÇA] >> "%logFile%"
 
-:: Internet - baixar segurança e desativar modo protegido
-reg add "HKU\Default\Software\Microsoft\Windows\CurrentVersion\Internet Settings\Zones\3" /v 1200 /t REG_DWORD /d 0 /f 2>> "%LOG%"  :: Executar scripts
-reg add "HKU\Default\Software\Microsoft\Windows\CurrentVersion\Internet Settings\Zones\3" /v 2500 /t REG_DWORD /d 3 /f 2>> "%LOG%"  :: Modo protegido = desativado
+:: 9. Habilitar Java Plugin (Internet Explorer)
+reg add "HKLM\Software\Microsoft\Internet Explorer\Main" /v "EnableJava" /t REG_DWORD /d 1 /f || echo [ERRO JAVA] >> "%logFile%"
 
-:: Habilitar Java Plugin (se aplicável)
-reg add "HKLM\Software\Microsoft\Internet Explorer\Main\FeatureControl\FEATURE_BROWSER_EMULATION" /v java.exe /t REG_DWORD /d 11000 /f 2>> "%LOG%"
+:: 10. Avançado - Ativar TLS e SSL
+for %%A in ("SSL 3.0" "TLS 1.0" "TLS 1.1" "TLS 1.2" "TLS 1.3") do (
+    reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v "SecureProtocols" /t REG_DWORD /d 0xA80 /f >nul 2>nul
+)
 
-:: Avançado - ativar protocolos SSL 3.0, TLS 1.0, 1.1, 1.2, 1.3
-reg add "HKU\Default\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v SecureProtocols /t REG_DWORD /d 0xA80 /f 2>> "%LOG%"
-reg add "HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\SSL 3.0\Client" /v Enabled /t REG_DWORD /d 1 /f 2>> "%LOG%"
-reg add "HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\SSL 3.0\Server" /v Enabled /t REG_DWORD /d 1 /f 2>> "%LOG%"
-reg add "HKLM\SOFTWARE\Policies\Microsoft\Edge" /v TLS13Enabled /t REG_DWORD /d 1 /f 2>> "%LOG%"
+:: 11. Avançado - Desativar verificação de certificados
+reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v "CertificateRevocation" /t REG_DWORD /d 0 /f || echo [ERRO REVOGAÇÃO CERTIFICADOS] >> "%logFile%"
+reg add "HKCU\Software\Microsoft\Internet Explorer\Download" /v "CheckExeSignatures" /t REG_SZ /d "no" /f || echo [ERRO ASSINATURA DOWNLOAD] >> "%logFile%"
+reg add "HKCU\Software\Microsoft\Internet Explorer\Main" /v "CheckCertPublisherRevocation" /t REG_DWORD /d 0 /f || echo [ERRO REVOGAÇÃO FORNECEDOR] >> "%logFile%"
 
-:: Avançado - desativar verificações de certificados
-reg add "HKU\Default\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v CertificateRevocation /t REG_DWORD /d 0 /f 2>> "%LOG%"
-reg add "HKU\Default\Software\Microsoft\Internet Explorer\Download" /v CheckExeSignatures /t REG_SZ /d "no" /f 2>> "%LOG%"
-reg add "HKU\Default\Software\Microsoft\Windows\CurrentVersion\WinTrust\Trust Providers\Software Publishing" /v State /t REG_DWORD /d 146944 /f 2>> "%LOG%"
-
-reg unload HKU\Default 2>> "%LOG%"
-
-:: Finalização
-echo [FIM - %DATE% %TIME%] >> "%LOG%"
-shutdown /r /t 15 /f
+:: Final do script
+echo [FIM - %date% %time%] >> "%logFile%"
+timeout /t 10 >nul
+shutdown -r -t 15
+exit
